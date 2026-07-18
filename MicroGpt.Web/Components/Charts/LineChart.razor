@@ -1,0 +1,54 @@
+@* Live training-loss chart: raw loss as faint dots, EMA as the signal line. Pure SVG. *@
+<div class="chart">
+    @if (Points.Count >= 2)
+    {
+        <svg viewBox="0 0 640 220" preserveAspectRatio="none" role="img" aria-label="Training loss over steps">
+            @for (var g = 1; g < 5; g++)
+            {
+                var y = 10 + g * (H - 30) / 5.0;
+                <line x1="46" y1="@F(y)" x2="634" y2="@F(y)" class="grid" />
+            }
+            <polyline points="@RawPath" class="raw" />
+            <polyline points="@EmaPath" class="ema" />
+            @SvgText(46, H - 4, "axis", $"step {Points[0].Step}")
+            @SvgText(634, H - 4, "axis", $"step {Points[^1].Step}", "end")
+            @SvgText(4, 16, "axis", F2(_max))
+            @SvgText(4, H - 22, "axis", F2(_min))
+        </svg>
+    }
+</div>
+
+@code {
+    private const double H = 220;
+    [Parameter, EditorRequired] public IReadOnlyList<MicroGpt.Web.Models.LossPoint> Points { get; set; } = Array.Empty<MicroGpt.Web.Models.LossPoint>();
+
+    private double _min, _max;
+    private string RawPath = "", EmaPath = "";
+
+    protected override void OnParametersSet()
+    {
+        if (Points.Count < 2) return;
+        _min = Points.Min(p => Math.Min(p.Loss, p.Ema));
+        _max = Points.Max(p => Math.Max(p.Loss, p.Ema));
+        if (_max - _min < 1e-9) _max = _min + 1e-9;
+        var x0 = (double)Points[0].Step;
+        var x1 = (double)Points[^1].Step;
+        if (x1 - x0 < 1e-9) x1 = x0 + 1;
+
+        string Pt(double step, double v)
+        {
+            var x = 46 + (step - x0) / (x1 - x0) * 588;
+            var y = 10 + (1 - (v - _min) / (_max - _min)) * (H - 40);
+            return $"{x:F1},{y:F1}";
+        }
+
+        RawPath = string.Join(' ', Points.Select(p => Pt(p.Step, p.Loss)));
+        EmaPath = string.Join(' ', Points.Select(p => Pt(p.Step, p.Ema)));
+    }
+
+    private static string F(double v) => v.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static MarkupString SvgText(double x, double y, string cls, string content, string anchor = "start")
+        => new($"<text x=\"{F(x)}\" y=\"{F(y)}\" class=\"{cls}\" text-anchor=\"{anchor}\">{System.Net.WebUtility.HtmlEncode(content)}</text>");
+    private static string F2(double v) => v.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+}

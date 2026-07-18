@@ -1,0 +1,57 @@
+@* Distribution histogram with an optional threshold marker. Pure SVG. *@
+<div class="chart">
+    @if (_bins.Length > 0)
+    {
+        <svg viewBox="0 0 640 200" preserveAspectRatio="none" role="img" aria-label="@Label">
+            @for (var i = 0; i < _bins.Length; i++)
+            {
+                var x = 46 + i * _bw;
+                var h = _maxCount > 0 ? _bins[i] / (double)_maxCount * 150 : 0;
+                <rect x="@F(x + 0.5)" y="@F(170 - h)" width="@F(Math.Max(0.5, _bw - 1))" height="@F(h)" class="bar" />
+            }
+            @if (Threshold is { } th && th >= _lo && th <= _hi)
+            {
+                var tx = 46 + (th - _lo) / (_hi - _lo) * 588;
+                <line x1="@F(tx)" y1="8" x2="@F(tx)" y2="170" class="threshold" />
+                @SvgText(Math.Min(tx + 4, 560), 20, "axis accent", $"threshold {F2(th)}")
+            }
+            @SvgText(46, 192, "axis", F2(_lo))
+            @SvgText(634, 192, "axis", F2(_hi), "end")
+            @SvgText(4, 16, "axis", _maxCount.ToString())
+        </svg>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<double> Values { get; set; } = Array.Empty<double>();
+    [Parameter] public int Bins { get; set; } = 40;
+    [Parameter] public double? Threshold { get; set; }
+    [Parameter] public string Label { get; set; } = "Distribution";
+
+    private long[] _bins = Array.Empty<long>();
+    private long _maxCount;
+    private double _lo, _hi, _bw;
+
+    protected override void OnParametersSet()
+    {
+        var vals = Values.Where(v => !double.IsNaN(v) && !double.IsInfinity(v)).ToList();
+        if (vals.Count == 0) { _bins = Array.Empty<long>(); return; }
+        _lo = vals.Min();
+        _hi = vals.Max();
+        if (_hi - _lo < 1e-9) _hi = _lo + 1e-9;
+        _bins = new long[Bins];
+        foreach (var v in vals)
+        {
+            var b = Math.Clamp((int)((v - _lo) / (_hi - _lo) * Bins), 0, Bins - 1);
+            _bins[b]++;
+        }
+        _maxCount = _bins.Max();
+        _bw = 588.0 / Bins;
+    }
+
+    private static string F(double v) => v.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static MarkupString SvgText(double x, double y, string cls, string content, string anchor = "start")
+        => new($"<text x=\"{F(x)}\" y=\"{F(y)}\" class=\"{cls}\" text-anchor=\"{anchor}\">{System.Net.WebUtility.HtmlEncode(content)}</text>");
+    private static string F2(double v) => v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+}

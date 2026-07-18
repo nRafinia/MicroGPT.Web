@@ -1,0 +1,203 @@
+@inject AppState State
+@inject TrainingSession Session
+@inject IJSRuntime Js
+
+<section class="panel">
+    <header class="panel-head">
+        <h2>Score / anomaly detection</h2>
+        <p>Each line gets the model's mean next-token loss. Lines the model finds surprising
+           (high loss) are out of distribution — likely anomalies.</p>
+    </header>
+
+    @if (State.Model is null)
+    {
+        <div class="notice">No model yet. Train one (step 2) or upload a .mgpt file in the Model tab.</div>
+    }
+    else
+    {
+        <div class="card">
+            <label class="grow">Lines to score (one per line)
+                <textarea rows="6" @bind="_input" placeholder="Paste lines here…"></textarea>
+            </label>
+            <div class="row wrap">
+                <button class="btn primary" @onclick="ScorePasted" disabled="@_busy">Score pasted lines</button>
+                @if (State.Dataset is { } ds)
+                {
+                    <button class="btn ghost" @onclick="ScoreDataset" disabled="@_busy">
+                        Score the loaded sample (@Math.Min(ds.Docs.Count, MaxDatasetScore).ToString("N0") lines)
+                    </button>
+                }
+                <label class="file-label">
+                    <InputFile OnChange="ScoreFile" />
+                    <span class="btn ghost">Score a file…</span>
+                </label>
+                @if (_busy)
+                {
+                    <span class="hint">Scoring… @_done.ToString("N0") lines</span>
+                }
+            </div>
+            @if (_error is not null)
+            {
+                <p class="error">@_error</p>
+            }
+        </div>
+
+        <details class="help">
+            <summary>How scoring works</summary>
+            <dl>
+                <dt>Loss</dt><dd>Mean next-token cross-entropy per line — how surprised the model is. Low = looks like the training data; high = out of distribution.</dd>
+                <dt>Threshold percentile</dt><dd>Lines above the threshold are flagged. With a model trained here, the threshold comes from held-out clean data (e.g. p95 = only 5% of clean lines score higher). For an uploaded model it falls back to the percentile of the scored set itself.</dd>
+                <dt>OOV</dt><dd>The line contains a character the model has never seen — automatically the strongest possible anomaly signal.</dd>
+            </dl>
+        </details>
+
+        @if (_rows.Count > 0)
+        {
+            <div class="card">
+                <div class="row space wrap">
+                    <h3>Results <span class="dim">(@_rows.Count.ToString("N0") lines, @AnomalyCount anomalies, @OovCount out-of-vocab)</span></h3>
+                    <button class="btn ghost" @onclick="DownloadTsv">Download .tsv</button>
+                </div>
+
+                <div class="row wrap controls">
+                    <label>Flag above percentile
+                        <input type="range" min="90" max="99" step="1" @bind="_percentile" @bind:after="ApplyThreshold" />
+                        <span class="mono">p@(_percentile)</span>
+                    </label>
+                    <span class="mono">threshold = @_threshold.ToString("F3")</span>
+                    <span class="hint">
+                        @(Session.Calibration is not null
+                            ? $"calibrated on {Session.Calibration.HoldoutCount} held-out clean documents"
+                            : "no calibration available (uploaded model) — percentile of the scored set itself")
+                    </span>
+                </div>
+
+                <h4>Loss distribution</h4>
+                <Histogram Values="_lossValues" Bins="48" Threshold="_threshold" Label="Loss distribution" />
+
+                <h4>Highest-loss lines</h4>
+                <table class="table">
+                    <thead><tr><th>Loss</th><th>Verdict</th><th>Text</th></tr></thead>
+                    <tbody>
+                        @foreach (var r in _rows.OrderByDescending(r => r.OutOfVocab ? double.MaxValue : r.Loss).Take(_showTop))
+                        {
+                            <tr class="@(r.OutOfVocab || r.Loss > _threshold ? "anomaly" : "")">
+                                <td class="mono">@(r.OutOfVocab ? "OOV" : r.Loss.ToString("F3"))</td>
+                                <td>@(r.OutOfVocab ? "out-of-vocab" : r.Loss > _threshold ? "ANOMALY" : "ok")</td>
+                                <td class="mono clip">@r.Text</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+                @if (_rows.Count > _showTop)
+                {
+                    <button class="btn ghost" @onclick="() => _showTop += 50">Show more</button>
+                }
+            </div>
+        }
+    }
+</section>
+
+@code {
+    private const int MaxDatasetScore = 20_000;
+    private const int MaxFileScore = 50_000;
+    private const long MaxUploadBytes = 1024L * 1024 * 1024;
+
+    private string _input = "";
+    private bool _busy;
+    private int _done;
+    private string? _error;
+    private int _percentile = 95;
+    private double _threshold;
+    private int _showTop = 30;
+    private readonly List<MicroGpt.Web.Models.ScoreRow> _rows = new();
+    private IReadOnlyList<double> _lossValues = Array.Empty<double>();
+
+    private int AnomalyCount => _rows.Count(r => !r.OutOfVocab && r.Loss > _threshold);
+    private int OovCount => _rows.Count(r => r.OutOfVocab);
+
+    private Task ScorePasted()
+        => ScoreLines(_input.Split('\n').Select(l => l.TrimEnd('\r').Trim()).Where(l => l.Length > 0));
+
+    private Task ScoreDataset()
+        => State.Dataset is { } ds ? ScoreLines(ds.Docs.Take(MaxDatasetScore)) : Task.CompletedTask;
+
+    private async Task ScoreFile(InputFileChangeEventArgs e)
+    {
+        try
+        {
+            await using var stream = e.File.OpenReadStream(MaxUploadBytes);
+            using var reader = new StreamReader(stream);
+            var lines = new List<string>(1024);
+            while (await reader.ReadLineAsync() is { } line && lines.Count < MaxFileScore)
+            {
+                var v = line.Trim();
+                if (v.Length > 0) lines.Add(v);
+            }
+            if (lines.Count == MaxFileScore)
+                _error = $"Only the first {MaxFileScore:N0} non-empty lines are scored to keep memory bounded.";
+            await ScoreLines(lines);
+        }
+        catch (Exception ex)
+        {
+            _error = $"Could not read the file: {ex.Message}";
+        }
+    }
+
+    private async Task ScoreLines(IEnumerable<string> lines)
+    {
+        if (State.Model is not { } model) return;
+        _busy = true;
+        _error = null;
+        _done = 0;
+        _rows.Clear();
+        _showTop = 30;
+        try
+        {
+            var sampler = new Sampler(model, 0);
+            foreach (var line in lines)
+            {
+                double loss;
+                var oov = false;
+                try { loss = sampler.ComputeLoss(line); }
+                catch (ArgumentException) { loss = double.NaN; oov = true; } // unseen character
+                _rows.Add(new MicroGpt.Web.Models.ScoreRow(line, loss, oov));
+                _done++;
+                if (_done % 100 == 0) { StateHasChanged(); await Task.Delay(1); }
+            }
+
+            _lossValues = _rows.Where(r => !r.OutOfVocab).Select(r => r.Loss).ToList();
+            ApplyThreshold();
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private void ApplyThreshold()
+    {
+        if (Session.Calibration is { } cal)
+        {
+            _threshold = cal.AtPercentile(_percentile);
+        }
+        else if (_lossValues.Count > 0)
+        {
+            var sorted = _lossValues.OrderBy(v => v).ToList();
+            var idx = Math.Clamp((int)Math.Ceiling(_percentile / 100.0 * sorted.Count) - 1, 0, sorted.Count - 1);
+            _threshold = sorted[idx];
+        }
+    }
+
+    private async Task DownloadTsv()
+    {
+        var sb = new System.Text.StringBuilder("loss\tverdict\ttext\n");
+        foreach (var r in _rows.OrderByDescending(r => r.OutOfVocab ? double.MaxValue : r.Loss))
+        {
+            var verdict = r.OutOfVocab ? "oov" : r.Loss > _threshold ? "anomaly" : "ok";
+            sb.Append(r.OutOfVocab ? "" : r.Loss.ToString("F4")).Append('\t')
+              .Append(verdict).Append('\t').Append(r.Text.Replace('\t', ' ')).Append('\n');
+        }
+        await AppState.DownloadTextAsync(Js, "scores.tsv", sb.ToString(), "text/tab-separated-values");
+    }
+}

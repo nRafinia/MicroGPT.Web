@@ -1,0 +1,80 @@
+@namespace MicroGpt.Web
+@inject AppState State
+@inject IJSRuntime Js
+@implements IDisposable
+
+<div class="app">
+    <header class="nameplate">
+        <div class="nameplate-title">
+            <span class="brand">MicroGPT</span>
+            <span class="sub">in-browser lab</span>
+        </div>
+        <div class="nameplate-cells mono">
+            <span class="cell"><i>runtime</i> .NET WebAssembly</span>
+            <span class="cell"><i>compute</i> this tab, your CPU</span>
+            <span class="cell ok"><i>your data</i> never leaves this device</span>
+            <span class="cell"><i>model</i> @(State.Model is { } m ? $"{m.ParameterCount:N0} params" : "none")</span>
+        </div>
+    </header>
+
+    <p class="tagline">
+        Train, sample, and anomaly-score a tiny character-level GPT — entirely inside your browser.
+        A live demo of <a href="https://github.com/nRafinia/MicroGPT" target="_blank" rel="noopener">MicroGPT</a>,
+        a dependency-free GPT implementation in pure C#. No server, no upload, no API key:
+        close this tab and everything is gone unless you download it.
+    </p>
+
+    <nav class="tabs" role="tablist">
+        <button role="tab" class="@TabClass(Tab.Data)" @onclick="() => _tab = Tab.Data">
+            <em>1</em> Data
+        </button>
+        <button role="tab" class="@TabClass(Tab.Train)" @onclick="() => _tab = Tab.Train">
+            <em>2</em> Train
+        </button>
+        <button role="tab" class="@TabClass(Tab.Generate)" disabled="@(State.Model is null)" @onclick="() => _tab = Tab.Generate">
+            <em>3</em> Generate
+        </button>
+        <button role="tab" class="@TabClass(Tab.Score)" disabled="@(State.Model is null)" @onclick="() => _tab = Tab.Score">
+            <em>4</em> Score
+        </button>
+        <button role="tab" class="@TabClass(Tab.Model)" @onclick="() => _tab = Tab.Model">
+            <em>5</em> Model file
+        </button>
+    </nav>
+
+    <main>
+        @switch (_tab)
+        {
+            case Tab.Data: <DataPanel /> break;
+            case Tab.Train: <TrainPanel /> break;
+            case Tab.Generate: <GeneratePanel /> break;
+            case Tab.Score: <ScorePanel /> break;
+            case Tab.Model: <ModelPanel /> break;
+        }
+    </main>
+
+    <footer class="foot">
+        <p>
+            <b>Everything is local by construction.</b> After the initial page load, this app makes no
+            network requests — not even for fonts (system fonts only). Open your browser's network tab
+            and verify it while training.
+        </p>
+        <p>
+            <b>What this is not.</b> MicroGPT models are 5k–100k parameters and built for short
+            structured strings — names, codes, URLs, CSV fields. They are not for long text, chat,
+            recommendations, or privacy guarantees (small models can memorize training rows).
+            Details in the <a href="https://github.com/nRafinia/MicroGPT" target="_blank" rel="noopener">repository</a>.
+        </p>
+    </footer>
+</div>
+
+@code {
+    private enum Tab { Data, Train, Generate, Score, Model }
+    private Tab _tab = Tab.Data;
+
+    private string TabClass(Tab t) => t == _tab ? "tab active" : "tab";
+
+    protected override void OnInitialized() => State.Changed += OnStateChanged;
+    private void OnStateChanged() => InvokeAsync(StateHasChanged);
+    public void Dispose() => State.Changed -= OnStateChanged;
+}

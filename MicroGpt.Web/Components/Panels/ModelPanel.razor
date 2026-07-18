@@ -1,0 +1,98 @@
+@inject AppState State
+@inject IJSRuntime Js
+
+<section class="panel">
+    <header class="panel-head">
+        <h2>Model file</h2>
+        <p>Download the trained model as a portable <code>.mgpt</code> file — the same versioned
+           binary format the MicroGPT CLI uses — and upload it later to skip training entirely.</p>
+    </header>
+
+    <div class="card">
+        <h3>Load an existing model</h3>
+        <div class="row wrap">
+            <label class="file-label">
+                <InputFile OnChange="Upload" />
+                <span class="btn">Upload .mgpt file</span>
+            </label>
+            <span class="hint">Format v1 and v2 files both load. The file is parsed in this tab only.</span>
+        </div>
+        @if (_error is not null)
+        {
+            <p class="error">@_error</p>
+        }
+    </div>
+
+    @if (State.Model is { } model)
+    {
+        <div class="card">
+            <div class="row space">
+                <h3>Current model <span class="tag">@State.ModelOrigin</span></h3>
+                <div class="row">
+                    <button class="btn primary" @onclick="Download">Download .mgpt</button>
+                    <button class="btn ghost" @onclick="Discard">Discard</button>
+                </div>
+            </div>
+            <div class="stat-grid">
+                <div class="stat"><b>@model.ParameterCount.ToString("N0")</b><span>parameters</span></div>
+                <div class="stat"><b>@model.Tokenizer.Size</b><span>vocab size (incl. BOS)</span></div>
+                <div class="stat"><b>@TokenizerName(model.Tokenizer)</b><span>tokenizer</span></div>
+                <div class="stat"><b>@model.Config.NumLayers</b><span>layers</span></div>
+                <div class="stat"><b>@model.Config.EmbeddingDim</b><span>embedding dim</span></div>
+                <div class="stat"><b>@model.Config.NumHeads</b><span>heads</span></div>
+                <div class="stat"><b>@model.Config.BlockSize</b><span>block size</span></div>
+                <div class="stat"><b>@EstimatedFileSize(model)</b><span>file size</span></div>
+            </div>
+        </div>
+    }
+    else
+    {
+        <div class="notice">No model in this session yet.</div>
+    }
+</section>
+
+@code {
+    private const long MaxUploadBytes = 256L * 1024 * 1024;
+    private string? _error;
+
+    private static string TokenizerName(ITokenizer t) => t switch
+    {
+        BpeTokenizer b => $"bpe ({b.Merges.Count} merges)",
+        CharTokenizer => "char",
+        _ => t.GetType().Name,
+    };
+
+    private static string EstimatedFileSize(GptModel m)
+    {
+        var bytes = m.ParameterCount * 8L; // doubles dominate the file
+        return bytes < 1024 * 1024 ? $"~{bytes / 1024.0:F0} KB" : $"~{bytes / 1024.0 / 1024.0:F1} MB";
+    }
+
+    private async Task Upload(InputFileChangeEventArgs e)
+    {
+        _error = null;
+        try
+        {
+            await using var stream = e.File.OpenReadStream(MaxUploadBytes);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            ms.Position = 0;
+            var model = GptModel.Load(ms);
+            State.SetModel(model, "uploaded");
+        }
+        catch (Exception ex)
+        {
+            _error = $"Not a valid model file: {ex.Message}";
+        }
+    }
+
+    private async Task Download()
+    {
+        if (State.Model is not { } model) return;
+        using var ms = new MemoryStream();
+        model.Save(ms);
+        await AppState.DownloadBytesAsync(Js, "model.mgpt", ms.ToArray(), "application/octet-stream");
+    }
+
+    private void Discard() => State.SetModel(null, "");
+}

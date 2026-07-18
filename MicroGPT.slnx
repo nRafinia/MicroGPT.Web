@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="MicroGpt.Web/MicroGpt.Web.csproj" />
+  <Project Path="MicroGpt/MicroGpt.csproj" />
+</Solution>

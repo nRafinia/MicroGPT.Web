@@ -1,0 +1,278 @@
+@inject AppState State
+@inject HttpClient Http
+
+<section class="panel">
+    <header class="panel-head">
+        <h2>Load data</h2>
+        <p>Upload a plain-text file (one document per line) or a CSV and pick a column.
+           The file is read as a stream inside this tab — it is never uploaded anywhere.</p>
+    </header>
+
+    <div class="row wrap">
+        <label class="file-label">
+            <InputFile OnChange="OnFileSelected" />
+            <span class="btn">Choose file (.txt / .csv)</span>
+        </label>
+        <span class="hint">or try a bundled sample:</span>
+        <button class="btn ghost" @onclick='() => LoadSample("sample-data/first-names.txt", "first-names.txt")'>First names (.txt)</button>
+        <button class="btn ghost" @onclick='() => LoadSample("sample-data/products.csv", "products.csv")'>Product catalog (.csv)</button>
+    </div>
+
+    @if (_error is not null)
+    {
+        <p class="error">@_error</p>
+    }
+
+    @if (_preview is not null && State.Dataset is null)
+    {
+        <div class="card">
+            <h3>@_preview.FileName <span class="dim">(@FormatBytes(_preview.FileSizeBytes))</span></h3>
+
+            @if (_isLarge)
+            {
+                <div class="notice">
+                    <strong>Large file.</strong> Roughly @_preview.EstimatedTotalLines.ToString("N0") lines estimated.
+                    To keep browser memory bounded, a seeded reservoir sample of at most
+                    <b>@_maxDocs.ToString("N0")</b> lines will be used for training — the character
+                    vocabulary and the statistics below are still computed over the <em>entire</em> file,
+                    so no character is ever missed. This is the same guarantee the MicroGPT CLI gives
+                    with <code>--max-docs</code>. Adjust the cap, then continue.
+                </div>
+            }
+
+            <div class="row wrap controls">
+                @if (_preview.LooksLikeCsv)
+                {
+                    <label>Format
+                        <select @bind="_format">
+                            <option value="csv">CSV (delimiter "@DelimiterName")</option>
+                            <option value="text">Plain text, whole line</option>
+                        </select>
+                    </label>
+                    @if (_format == "csv")
+                    {
+                        <label>Column
+                            <select @bind="_columnIndex">
+                                @for (var i = 0; i < _preview.HeaderCandidates.Count; i++)
+                                {
+                                    var idx = i;
+                                    <option value="@idx">@(idx): @Truncate(_preview.HeaderCandidates[idx], 24)</option>
+                                }
+                            </select>
+                        </label>
+                        <label class="check"><input type="checkbox" @bind="_hasHeader" /> First row is a header</label>
+                    }
+                }
+                <label>Sample cap (max-docs)
+                    <input type="number" @bind="_maxDocs" min="100" max="500000" step="1000" />
+                </label>
+                <label>Seed <input type="number" @bind="_seed" /></label>
+            </div>
+
+            <details>
+                <summary>Preview (first @_preview.Lines.Count lines)</summary>
+                <pre class="preview">@string.Join("\n", _preview.Lines.Take(12))</pre>
+            </details>
+
+            <div class="row">
+                <button class="btn primary" @onclick="LoadFull" disabled="@_loading">
+                    @(_isLarge ? "Continue with sampling" : "Load dataset")
+                </button>
+                @if (_loading)
+                {
+                    <span class="hint">Reading… @_progressLines.ToString("N0") lines</span>
+                }
+            </div>
+        </div>
+    }
+
+    @if (State.Dataset is { } ds)
+    {
+        <div class="card">
+            <div class="row space">
+                <h3>@ds.SourceName</h3>
+                <button class="btn ghost" @onclick="Reset">Load different data</button>
+            </div>
+            <div class="stat-grid">
+                <div class="stat"><b>@ds.TotalLines.ToString("N0")</b><span>lines read</span></div>
+                <div class="stat"><b>@ds.Docs.Count.ToString("N0")</b><span>in sample @(ds.WasSampled ? "(reservoir)" : "(all)")</span></div>
+                <div class="stat"><b>@ds.Charset.Length</b><span>distinct characters</span></div>
+                <div class="stat"><b>@ds.AvgLength.ToString("F1")</b><span>avg length</span></div>
+                <div class="stat"><b>@ds.MaxLength</b><span>max length</span></div>
+                <div class="stat"><b>@ds.SkippedEmpty.ToString("N0")</b><span>empty skipped</span></div>
+            </div>
+
+            @if (ds.MaxLength > 300)
+            {
+                <div class="notice warn">
+                    The longest line is @ds.MaxLength characters. Attention cost is quadratic in
+                    sequence length, so training will be slow. Consider shorter rows or the BPE tokenizer.
+                </div>
+            }
+
+            <h4>Line length distribution <span class="dim">(entire file)</span></h4>
+            <Histogram Values="_lengthValues" Bins="48" Label="Line length distribution" />
+
+            <h4>Most frequent characters <span class="dim">(entire file)</span></h4>
+            <BarChart Items="_topCharItems" Label="Character frequency" />
+        </div>
+    }
+</section>
+
+@code {
+    private IBrowserFile? _file;
+    private FilePreview? _preview;
+    private string _format = "csv";
+    private bool _hasHeader = true;
+    private int _columnIndex;
+    private int _maxDocs = 50_000;
+    private int _seed = 42;
+    private bool _loading;
+    private long _progressLines;
+    private string? _error;
+
+    private const long LargeFileBytes = 4 * 1024 * 1024;
+    private const long MaxUploadBytes = 1024L * 1024 * 1024;
+    private bool _isLarge => _preview is { FileSizeBytes: > LargeFileBytes };
+    private string DelimiterName => _preview?.Delimiter switch
+    {
+        '\t' => "tab", ';' => ";", '|' => "|", _ => ","
+    };
+
+    private IReadOnlyList<double> _lengthValues = Array.Empty<double>();
+    private IReadOnlyList<(string, long)> _topCharItems = Array.Empty<(string, long)>();
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        _error = null;
+        State.SetDataset(null);
+        _file = e.File;
+        try
+        {
+            await using var stream = _file.OpenReadStream(MaxUploadBytes);
+            _preview = await DatasetService.PreviewAsync(stream, _file.Name, _file.Size);
+            _format = _preview.LooksLikeCsv ? "csv" : "text";
+            _columnIndex = 0;
+        }
+        catch (Exception ex)
+        {
+            _error = $"Could not read the file: {ex.Message}";
+            _preview = null;
+        }
+    }
+
+    private async Task LoadSample(string url, string name)
+    {
+        _error = null;
+        State.SetDataset(null);
+        _file = null;
+        try
+        {
+            var bytes = await Http.GetByteArrayAsync(url);
+            using (var ps = new MemoryStream(bytes))
+            {
+                _preview = await DatasetService.PreviewAsync(ps, name, bytes.Length);
+            }
+            _format = _preview.LooksLikeCsv ? "csv" : "text";
+            _hasHeader = _preview.LooksLikeCsv;
+            _columnIndex = 0;
+            _sampleBytes = bytes;
+        }
+        catch (Exception ex)
+        {
+            _error = $"Could not load the sample: {ex.Message}";
+        }
+    }
+
+    private byte[]? _sampleBytes;
+
+    private async Task LoadFull()
+    {
+        if (_preview is null) return;
+        _loading = true;
+        _progressLines = 0;
+        _error = null;
+        try
+        {
+            var options = new LoadOptions
+            {
+                ColumnIndex = _format == "csv" && _preview.LooksLikeCsv ? _columnIndex : -1,
+                Delimiter = _preview.Delimiter ?? ',',
+                HasHeader = _format == "csv" && _hasHeader,
+                MaxDocs = Math.Clamp(_maxDocs, 100, 500_000),
+                Seed = _seed,
+            };
+
+            Stream stream = _sampleBytes is not null
+                ? new MemoryStream(_sampleBytes)
+                : _file!.OpenReadStream(MaxUploadBytes);
+
+            await using (stream)
+            {
+                var columnName = options.ColumnIndex >= 0 && options.ColumnIndex < _preview.HeaderCandidates.Count
+                    ? _preview.HeaderCandidates[options.ColumnIndex] : null;
+                var sourceName = columnName is null
+                    ? _preview.FileName
+                    : $"{_preview.FileName} · column \"{columnName}\"";
+
+                var ds = await DatasetService.LoadAsync(stream, sourceName, options,
+                    onProgress: lines => { _progressLines = lines; StateHasChanged(); return Task.CompletedTask; });
+
+                PrepareCharts(ds);
+                State.SetDataset(ds);
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = $"Loading failed: {ex.Message}. If the file stream expired, please choose the file again.";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void PrepareCharts(Dataset ds)
+    {
+        // Expand the length histogram counts back into values for the shared Histogram component.
+        var values = new List<double>();
+        for (var len = 0; len < ds.LengthCounts.Length; len++)
+        {
+            var count = ds.LengthCounts[len];
+            if (count == 0) continue;
+            // cap expansion so the chart stays cheap on huge files
+            var take = (int)Math.Min(count, 2000);
+            for (var i = 0; i < take; i++) values.Add(len);
+        }
+        _lengthValues = values;
+
+        _topCharItems = ds.TopChars
+            .Select(t => (DisplayChar(t.Ch), t.Count))
+            .ToList();
+    }
+
+    private static string DisplayChar(char c) => c switch
+    {
+        ' ' => "(space)",
+        '\t' => "(tab)",
+        _ when char.IsControl(c) => $"U+{(int)c:X4}",
+        _ => c.ToString(),
+    };
+
+    private void Reset()
+    {
+        _preview = null;
+        _file = null;
+        _sampleBytes = null;
+        State.SetDataset(null);
+    }
+
+    private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
+    private static string FormatBytes(long b) => b switch
+    {
+        < 1024 => $"{b} B",
+        < 1024 * 1024 => $"{b / 1024.0:F1} KB",
+        < 1024L * 1024 * 1024 => $"{b / 1024.0 / 1024.0:F1} MB",
+        _ => $"{b / 1024.0 / 1024.0 / 1024.0:F2} GB",
+    };
+}

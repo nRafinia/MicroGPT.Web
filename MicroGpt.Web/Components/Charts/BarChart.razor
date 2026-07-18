@@ -1,0 +1,30 @@
+@* Horizontal bar chart for categorical counts (e.g. top characters). Pure SVG. *@
+<div class="chart">
+    @if (Items.Count > 0)
+    {
+        var rowH = 18;
+        var height = Items.Count * rowH + 8;
+        <svg viewBox="0 0 640 @height" preserveAspectRatio="none" role="img" aria-label="@Label">
+            @for (var i = 0; i < Items.Count; i++)
+            {
+                var (label, value) = Items[i];
+                var y = 4 + i * rowH;
+                var w = _max > 0 ? value / (double)_max * 500 : 0;
+                @SvgText(70, y + 12, "axis", label, "end")
+                <rect x="78" y="@(y + 2)" width="@F(Math.Max(1, w))" height="@(rowH - 6)" class="bar" />
+                @SvgText(84 + w, y + 12, "axis", value.ToString("N0"))
+            }
+        </svg>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<(string Label, long Value)> Items { get; set; } = Array.Empty<(string, long)>();
+    [Parameter] public string Label { get; set; } = "Counts";
+    private long _max;
+    protected override void OnParametersSet() => _max = Items.Count > 0 ? Items.Max(i => i.Value) : 0;
+    private static string F(double v) => v.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static MarkupString SvgText(double x, double y, string cls, string content, string anchor = "start")
+        => new($"<text x=\"{F(x)}\" y=\"{F(y)}\" class=\"{cls}\" text-anchor=\"{anchor}\">{System.Net.WebUtility.HtmlEncode(content)}</text>");
+}

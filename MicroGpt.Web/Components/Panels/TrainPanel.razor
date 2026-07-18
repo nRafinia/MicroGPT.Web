@@ -1,0 +1,166 @@
+@inject AppState State
+@inject TrainingSession Session
+@implements IDisposable
+
+<section class="panel">
+    <header class="panel-head">
+        <h2>Train a model</h2>
+        <p>Every optimization step runs as WebAssembly in this tab, on your CPU.
+           The page stays interactive; you can stop at any time.</p>
+    </header>
+
+    @if (State.Dataset is null)
+    {
+        <div class="notice">Load a dataset first (step 1), or upload an existing .mgpt model in the Model tab.</div>
+    }
+    else
+    {
+        var s = State.TrainSettings;
+        <div class="card">
+            <h3>Hyperparameters</h3>
+            <div class="row wrap controls">
+                <label>Embedding dim
+                    <select value="@s.EmbeddingDim" @onchange='e => Update(x => x with { EmbeddingDim = int.Parse((string)e.Value!) })'>
+                        <option>8</option><option>16</option><option>32</option><option>48</option><option>64</option>
+                    </select>
+                </label>
+                <label>Heads
+                    <select value="@s.NumHeads" @onchange='e => Update(x => x with { NumHeads = int.Parse((string)e.Value!) })'>
+                        <option>2</option><option>4</option><option>8</option>
+                    </select>
+                </label>
+                <label>Layers
+                    <select value="@s.NumLayers" @onchange='e => Update(x => x with { NumLayers = int.Parse((string)e.Value!) })'>
+                        <option>1</option><option>2</option><option>3</option>
+                    </select>
+                </label>
+                <label>Steps
+                    <input type="number" value="@s.Steps" min="100" max="100000" step="500"
+                           @onchange='e => Update(x => x with { Steps = int.Parse((string)e.Value!) })' />
+                </label>
+                <label>Learning rate
+                    <input type="number" value="@s.LearningRate" min="0.0001" max="0.1" step="0.001"
+                           @onchange='e => Update(x => x with { LearningRate = double.Parse((string)e.Value!, System.Globalization.CultureInfo.InvariantCulture) })' />
+                </label>
+                <label>Seed
+                    <input type="number" value="@s.Seed"
+                           @onchange='e => Update(x => x with { Seed = int.Parse((string)e.Value!) })' />
+                </label>
+                <label>Tokenizer
+                    <select value="@s.TokenizerKind" @onchange='e => Update(x => x with { TokenizerKind = (string)e.Value! })'>
+                        <option value="char">char (every character)</option>
+                        <option value="bpe">bpe (merged pairs, digits atomic)</option>
+                    </select>
+                </label>
+                @if (s.TokenizerKind == "bpe")
+                {
+                    <label>BPE merges
+                        <input type="number" value="@s.BpeMerges" min="0" max="2000" step="50"
+                               @onchange='e => Update(x => x with { BpeMerges = int.Parse((string)e.Value!) })' />
+                    </label>
+                }
+            </div>
+            <details class="help">
+                <summary>What do these parameters mean?</summary>
+                <dl>
+                    <dt>Embedding dim</dt><dd>The model's capacity. Larger learns more complex patterns but trains slower and overfits small datasets. 16 for short single fields, 32 for structured multi-column rows. Must be divisible by heads.</dd>
+                    <dt>Heads</dt><dd>Parallel attention heads; each tracks a different relationship across positions. 2–8 is typical.</dd>
+                    <dt>Layers</dt><dd>Stacked transformer blocks. 1 is enough for most short-string tasks; use 2 if the loss plateaus too high.</dd>
+                    <dt>Steps</dt><dd>Optimization steps, one document each — independent of dataset size. Watch the loss curve: once it flattens, more steps add nothing.</dd>
+                    <dt>Learning rate</dt><dd>Decays linearly to zero over the chosen steps, so tune the two together. 0.01 from scratch; ~10× lower for fine-tuning.</dd>
+                    <dt>Seed</dt><dd>Makes initialization, shuffling, and the data split reproducible: same seed + same data = identical model.</dd>
+                    <dt>Tokenizer</dt><dd><b>char</b>: every character is a token — best for short free-form fields. <b>bpe</b>: merges frequent pairs into single tokens, shortening rows — a real speedup since attention cost is quadratic in length. Digits stay atomic so numeric codes keep their structure.</dd>
+                    <dt>BPE merges</dt><dd>How many pair merges to learn. More merges = larger vocabulary, shorter sequences.</dd>
+                </dl>
+            </details>
+            @if (_validation is not null)
+            {
+                <p class="error">@_validation</p>
+            }
+            <p class="hint">
+                Steps and learning rate are coupled: the rate decays linearly to zero over the chosen steps.
+                Large embedding dims overfit small datasets. 5% of the sample (up to 1,000 lines) is held out
+                to calibrate anomaly thresholds after training.
+            </p>
+            <div class="row">
+                @if (!Session.IsRunning)
+                {
+                    <button class="btn primary" @onclick="Start">Train in this browser</button>
+                }
+                else
+                {
+                    <button class="btn danger" @onclick="Session.Cancel">Stop</button>
+                }
+            </div>
+        </div>
+
+        @if (Session.Status.Length > 0)
+        {
+            <div class="card">
+                <div class="row space">
+                    <h3>Progress</h3>
+                    <span class="mono dim">@Session.Status</span>
+                </div>
+                @if (Session.TotalSteps > 0)
+                {
+                    <div class="progress-track">
+                        <div class="progress-fill" style="width:@(100.0 * Session.CurrentStep / Session.TotalSteps)%"></div>
+                    </div>
+                    <div class="row space mono dim small">
+                        <span>step @Session.CurrentStep.ToString("N0") / @Session.TotalSteps.ToString("N0")</span>
+                        <span>@Session.StepsPerSecond.ToString("F1") steps/s</span>
+                        <span>@Session.Elapsed.ToString(@"mm\:ss") elapsed</span>
+                        @if (Session.LastEma is { } ema)
+                        {
+                            <span>loss (EMA) @ema.ToString("F3")</span>
+                        }
+                    </div>
+                }
+                <h4>Training loss <span class="dim">(orange = smoothed, gray = raw)</span></h4>
+                <LineChart Points="Session.LossHistory" />
+                @if (Session.Calibration is { } cal)
+                {
+                    <h4>Held-out calibration <span class="dim">(@cal.HoldoutCount clean documents)</span></h4>
+                    <table class="table small">
+                        <thead><tr><th>Percentile</th><th>p50</th><th>p90</th><th>p95</th><th>p99</th></tr></thead>
+                        <tbody><tr><td>Loss</td>
+                            <td class="mono">@cal.P50.ToString("F3")</td>
+                            <td class="mono">@cal.P90.ToString("F3")</td>
+                            <td class="mono">@cal.P95.ToString("F3")</td>
+                            <td class="mono">@cal.P99.ToString("F3")</td>
+                        </tr></tbody>
+                    </table>
+                    <p class="hint">These become the suggested anomaly thresholds in the Score tab —
+                       measured on data the model never trained on, not arbitrary margins.</p>
+                }
+            </div>
+        }
+    }
+</section>
+
+@code {
+    private string? _validation;
+
+    protected override void OnInitialized() => Session.Changed += OnSessionChanged;
+    private void OnSessionChanged() => InvokeAsync(StateHasChanged);
+    public void Dispose() => Session.Changed -= OnSessionChanged;
+
+    private void Update(Func<MicroGpt.Web.Models.TrainSettings, MicroGpt.Web.Models.TrainSettings> f)
+    {
+        State.TrainSettings = f(State.TrainSettings);
+        _validation = Validate(State.TrainSettings);
+    }
+
+    private static string? Validate(MicroGpt.Web.Models.TrainSettings s)
+        => s.EmbeddingDim % s.NumHeads != 0
+            ? $"Embedding dim ({s.EmbeddingDim}) must be divisible by heads ({s.NumHeads})."
+            : null;
+
+    private async Task Start()
+    {
+        _validation = Validate(State.TrainSettings);
+        if (_validation is not null || State.Dataset is null) return;
+        var model = await Session.RunAsync(State.Dataset, State.TrainSettings);
+        if (model is not null) State.SetModel(model, "trained");
+    }
+}

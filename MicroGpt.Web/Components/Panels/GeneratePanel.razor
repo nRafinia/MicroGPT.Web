@@ -1,0 +1,116 @@
+@inject AppState State
+@inject IJSRuntime Js
+
+<section class="panel">
+    <header class="panel-head">
+        <h2>Generate</h2>
+        <p>Sample new documents from the learned distribution — synthetic rows that look like
+           your data but are produced token by token in this tab.</p>
+    </header>
+
+    @if (State.Model is null)
+    {
+        <div class="notice">No model yet. Train one (step 2) or upload a .mgpt file in the Model tab.</div>
+    }
+    else
+    {
+        <div class="card">
+            <div class="row wrap controls">
+                <label>Count <input type="number" @bind="_count" min="1" max="500" /></label>
+                <label>Temperature
+                    <input type="range" min="0.1" max="1.5" step="0.05" @bind="_temperature" />
+                    <span class="mono">@_temperature.ToString("F2")</span>
+                </label>
+                <label>Seed <input type="number" @bind="_seed" /></label>
+                <label class="grow">Prefix (optional — the model completes it)
+                    <input type="text" @bind="_prefix" placeholder="e.g. scifi,20" />
+                </label>
+            </div>
+            <details class="help">
+                <summary>What do these parameters mean?</summary>
+                <dl>
+                    <dt>Count</dt><dd>How many documents to sample.</dd>
+                    <dt>Temperature</dt><dd>Randomness of sampling. Low (0.2–0.4) is conservative and repetitive; high (0.8+) is varied but error-prone. 0.5 is a balanced default.</dd>
+                    <dt>Seed</dt><dd>Same seed + same model = identical output, for reproducible runs.</dd>
+                    <dt>Prefix</dt><dd>Conditional generation: the model is forced through your prefix, then completes the rest — "fill in the remaining fields of this row".</dd>
+                </dl>
+            </details>
+            <div class="row">
+                <button class="btn primary" @onclick="Generate" disabled="@_busy">
+                    @(_busy ? $"Generating {_done}/{_count}…" : "Generate")
+                </button>
+                @if (_results.Count > 0)
+                {
+                    <button class="btn ghost" @onclick="Download">Download .txt</button>
+                }
+            </div>
+            @if (_error is not null)
+            {
+                <p class="error">@_error</p>
+            }
+        </div>
+
+        @if (_results.Count > 0)
+        {
+            <div class="card">
+                <h3>Output <span class="dim">(@_results.Count documents)</span></h3>
+                <ol class="output-list mono">
+                    @foreach (var r in _results)
+                    {
+                        <li>@(_prefix.Length > 0 ? $"{_prefix}" : "")<b>@r</b></li>
+                    }
+                </ol>
+                @if (_prefix.Length > 0)
+                {
+                    <p class="hint">Regular text is your prefix; bold is what the model generated.</p>
+                }
+            </div>
+        }
+    }
+</section>
+
+@code {
+    private int _count = 20;
+    private double _temperature = 0.5;
+    private int _seed = 42;
+    private string _prefix = "";
+    private bool _busy;
+    private int _done;
+    private string? _error;
+    private readonly List<string> _results = new();
+
+    private async Task Generate()
+    {
+        if (State.Model is not { } model) return;
+        _busy = true;
+        _error = null;
+        _done = 0;
+        _results.Clear();
+        try
+        {
+            var sampler = new Sampler(model, _seed);
+            for (var i = 0; i < _count; i++)
+            {
+                _results.Add(_prefix.Length > 0
+                    ? sampler.SampleContinuation(_prefix, _temperature)
+                    : sampler.Sample(_temperature));
+                _done = i + 1;
+                if (i % 5 == 4) { StateHasChanged(); await Task.Delay(1); }
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            _error = $"Generation failed: {ex.Message}";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task Download()
+    {
+        var text = string.Join("\n", _results.Select(r => _prefix + r));
+        await AppState.DownloadTextAsync(Js, "generated.txt", text);
+    }
+}
