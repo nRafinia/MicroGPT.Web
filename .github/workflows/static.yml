@@ -1,0 +1,58 @@
+name: Deploy web demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/MicroGpt/**', 'src/MicroGpt.Web/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # AOT makes in-browser training several times faster; drop the workload
+      # install and the RunAOTCompilation flag for a faster CI build instead.
+      - name: Install wasm-tools workload
+        run: dotnet workload install wasm-tools
+
+      - name: Publish (AOT)
+        run: dotnet publish src/MicroGpt.Web -c Release -p:RunAOTCompilation=true -o publish
+
+      # GitHub Pages serves the site under /<repo>/, so rewrite the base href.
+      - name: Rewrite base href for Pages
+        run: |
+          repo="${GITHUB_REPOSITORY##*/}"
+          sed -i "s|<base href=\"/\" />|<base href=\"/${repo}/\" />|" publish/wwwroot/index.html
+
+      # Pages does not serve .br/.gz variants; ship the uncompressed files.
+      - name: Add .nojekyll
+        run: touch publish/wwwroot/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: publish/wwwroot
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
