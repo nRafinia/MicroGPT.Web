@@ -3,7 +3,7 @@ name: Deploy web demo to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ['src/MicroGpt/**', 'src/MicroGpt.Web/**']
+    paths: ['MicroGpt/**', 'src/MicroGpt.Web/**']
   workflow_dispatch:
 
 permissions:
