@@ -18,7 +18,7 @@ makes zero network requests (system fonts only, verifiable in the network tab).
 ## Project layout
 
 ```
-src/MicroGpt.Web/
+MicroGpt.Web/
   Program.cs, Main.razor          app shell (nameplate, pipeline tabs, footer)
   Models.cs                       records shared by the panels
   Services/
@@ -38,8 +38,8 @@ public API** — nothing in the library was modified or duplicated.
 ## Add to the solution and run
 
 ```powershell
-dotnet sln MicroGpt.sln add src\MicroGpt.Web
-dotnet run --project src\MicroGpt.Web
+dotnet sln MicroGpt.sln add MicroGpt.Web
+dotnet run --project MicroGpt.Web
 ```
 
 ## Publish
@@ -47,7 +47,7 @@ dotnet run --project src\MicroGpt.Web
 Interpreter mode (no extra workload needed):
 
 ```powershell
-dotnet publish src\MicroGpt.Web -c Release -o publish
+dotnet publish MicroGpt.Web -c Release -o publish
 ```
 
 Ahead-of-time compilation — strongly recommended for real training speed in the
@@ -55,7 +55,7 @@ browser (larger download, needs the wasm-tools workload):
 
 ```powershell
 dotnet workload install wasm-tools
-dotnet publish src\MicroGpt.Web -c Release -p:RunAOTCompilation=true -o publish-aot
+dotnet publish MicroGpt.Web -c Release -p:RunAOTCompilation=true -o publish-aot
 ```
 
 Serve any static file host from `publish/wwwroot`:
